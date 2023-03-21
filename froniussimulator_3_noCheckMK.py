@@ -145,7 +145,10 @@ def on_message(client, userdata, message):
 
     print("Received message '" + str(message.payload) + "' on topic '"
         + message.topic + "' with QoS " + str(message.qos))
-
+    
+    if not isfloat(message.payload):
+        return
+    
     lock.acquire()
 
     if message.topic == MQTT_TOPIC_CONSUMPTION:
@@ -201,11 +204,15 @@ def updating_writer(a_context):
 
     electrical_power_float = float(leistung) #extract value out of payload
     print (electrical_power_float)
-    electrical_power_hex = hex(struct.unpack('<I', struct.pack('<f', electrical_power_float))[0])
-    electrical_power_hex_part1 = str(electrical_power_hex)[2:6] #extract first register part (hex)
-    electrical_power_hex_part2 = str(electrical_power_hex)[6:10] #extract seconds register part (hex)
-    ep_int1 = int(electrical_power_hex_part1, 16) #convert hex to integer because pymodbus converts back to hex itself
-    ep_int2 = int(electrical_power_hex_part2, 16) #convert hex to integer because pymodbus converts back to hex itself
+    if electrical_power_float == 0:
+        ep_int1 = 0
+        ep_int2 = 0
+    else:
+        electrical_power_hex = hex(struct.unpack('<I', struct.pack('<f', electrical_power_float))[0])
+        electrical_power_hex_part1 = str(electrical_power_hex)[2:6] #extract first register part (hex)
+        electrical_power_hex_part2 = str(electrical_power_hex)[6:10] #extract seconds register part (hex)
+        ep_int1 = int(electrical_power_hex_part1, 16) #convert hex to integer because pymodbus converts back to hex itself
+        ep_int2 = int(electrical_power_hex_part2, 16) #convert hex to integer because pymodbus converts back to hex itself
 
     #Converting total import value of smart meter out of MQTT payload into Modbus register
 
