@@ -1,7 +1,11 @@
 #!/usr/bin/env python
 """
-Simulates a Fronius Smart Meter for providing necessary 
-information to inverters (e.g. Gen24). 
+v0.2
+Updated Version tested with OpenDTU and Gen24 Frimware > 1.30
+
+Simulates a Fronius Smart Meter for providing necessary
+information to inverters (e.g. Gen24).
+Can be used with OpenDTU.
 Necessary information is provied via MQTT and translated to MODBUS TCP
 
 Based on
@@ -11,7 +15,6 @@ https://www.photovoltaikforum.com/thread/185108-fronius-smart-meter-tcp-protokol
 ###############################################################
 # Import Libs
 ###############################################################
-from pymodbus.version import version
 from pymodbus.device import ModbusDeviceIdentification
 from pymodbus.datastore import ModbusSequentialDataBlock
 from pymodbus.datastore import ModbusSparseDataBlock
@@ -35,7 +38,6 @@ from pymodbus.transaction import (
     ModbusSocketFramer,
     ModbusTlsFramer,
 )
-from pymodbus.version import version
 
 ###############################################################
 # Timer Class
@@ -75,12 +77,15 @@ mqttconf = {
             'address': "",
             'port': 1883
 }
-MQTT_TOPIC_CONSUMPTION  = "FSM/Leistung" #Import Watts
-MQTT_TOPIC_TOTAL_IMPORT = "FSM/Netzbezug_total" #Import Wh
-MQTT_TOPIC_TOTAL_EXPORT = "FSM/Netzeinspeisung_total" #Export WH
-#MQTT_TOPIC_TIME = "FSM/Time" #Timestamp for Check MK 
+MQTT_TOPIC_CONSUMPTION  = "OpenDTU/ac/power" #OpenDTU Watts
+MQTT_TOPIC_TOTAL_IMPORT = "" #Import Wh
+MQTT_TOPIC_TOTAL_EXPORT = "OpenDTU/ac/yieldtotal" #Export WH
+MQTT_TOPIC_L1_CONSUMPTION = "" # L1 Watts
+MQTT_TOPIC_L2_CONSUMPTION= "" # L2 Watts
+MQTT_TOPIC_L3_CONSUMPTION = "" # L3 Watts, empty -> L1,L2,L3 i                                                                                                             s calculated
+#MQTT_TOPIC_TIME = "FSM/Time" #Timestamp for Check MK
 
-corrfactor = 1000 
+corrfactor = 1 # or 1000 
 i_corrfactor = int(corrfactor)
 
 modbus_port = 502
@@ -98,6 +103,9 @@ leistung = "0"
 einspeisung = "0"
 netzbezug = "0"
 rtime = 0
+l1 = "0"
+l2 = "0"
+l3 = "0"
 
 ti_int1 = "0"
 ti_int2 = "0"
@@ -105,79 +113,114 @@ exp_int1 = "0"
 exp_int2 = "0"
 ep_int1 = "0"
 ep_int2 = "0"
+l1_int1 = "0"
+l1_int2 = "0"
+l2_int1 = "0"
+l2_int2 = "0"
+l3_int1 = "0"
+l3_int2 = "0"
 
-mqttc = mqtt.Client("SmartMeter",clean_session=False)
-#mqttc.username_pw_set(mqttconf['username'], mqttconf['password'])
-mqttc.connect(mqttconf['address'], mqttconf['port'], 60)
+def isfloat(num):
+    try:
+        float(num)
+        return True
+    except ValueError:
+        return False
 
-mqttc.subscribe(MQTT_TOPIC_CONSUMPTION)
-mqttc.subscribe(MQTT_TOPIC_TOTAL_IMPORT)
-mqttc.subscribe(MQTT_TOPIC_TOTAL_EXPORT)
-mqttc.subscribe(MQTT_TOPIC_TIME)
-flag_connected = 0
+def init_mqtt():
+    mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,"SmartMeter",clean_session=False)
+    #mqttc.username_pw_set(mqttconf['username'], mqttconf['password'])
+    mqttc.connect(mqttconf['address'], mqttconf['port'], 60)
+
+    mqttc.subscribe(MQTT_TOPIC_CONSUMPTION)
+    if MQTT_TOPIC_TOTAL_IMPORT != "":
+        mqttc.subscribe(MQTT_TOPIC_TOTAL_IMPORT)
+    if MQTT_TOPIC_TOTAL_EXPORT != "":
+        mqttc.subscribe(MQTT_TOPIC_TOTAL_EXPORT)
+    if MQTT_TOPIC_L1_CONSUMPTION != "":
+        mqttc.subscribe(MQTT_TOPIC_L1_CONSUMPTION)
+    if MQTT_TOPIC_L2_CONSUMPTION != "":
+        mqttc.subscribe(MQTT_TOPIC_L2_CONSUMPTION)
+    if MQTT_TOPIC_L3_CONSUMPTION != "":
+        mqttc.subscribe(MQTT_TOPIC_L3_CONSUMPTION)
+
+    #mqttc.subscribe(MQTT_TOPIC_TIME)
+    flag_connected = 0
+
+    mqttc.on_disconnect = on_disconnect
+    mqttc.on_connect = on_connect
+    mqttc.on_message = on_message
+    mqttc.loop_start()
 
 def on_connect(client, userdata, flags, rc):
    global flag_connected
    flag_connected = 1
-#   with open('/var/lib/check_mk_agent/spool/mqtt', 'w') as the_file:
-#      the_file.write('<<<local>>>\n')
-#      the_file.write("0 MQTT connected=1 MQTT Connected\n")
    print("MQTT connection.")
 
 
 def on_disconnect(client, userdata, rc):
    global flag_connected
    flag_connected = 0
-#   with open('/var/lib/check_mk_agent/spool/mqtt', 'w') as the_file:
-#      the_file.write('<<<local>>>\n')
-#      the_file.write("2 MQTT connected=0 MQTT not Connected\n")
    print("Unexpected MQTT disconnection.")
-
-mqttc.on_disconnect = on_disconnect
-mqttc.on_connect = on_connect
-mqttc.clean_session=False
 
 def on_message(client, userdata, message):
     global leistung
     global einspeisung
     global netzbezug
-#    global rtime
+    global l1
+    global l2
+    global l3
+    global rtime
 
-    print("Received message '" + str(message.payload) + "' on topic '"
-        + message.topic + "' with QoS " + str(message.qos))
-    
+#    print("Received message '" + str(message.payload) + "' on topic '"
+#        + message.topic + "' with QoS " + str(message.qos))
+
     if not isfloat(message.payload):
         return
-    
+
     lock.acquire()
 
     if message.topic == MQTT_TOPIC_CONSUMPTION:
-       leistung = message.payload
+        leistung = message.payload
+    elif message.topic == MQTT_TOPIC_L1_CONSUMPTION:
+        l1 = message.payload
+    elif message.topic == MQTT_TOPIC_L2_CONSUMPTION:
+        l2 = message.payload
+    elif message.topic == MQTT_TOPIC_L3_CONSUMPTION:
+        l3 = message.payload
     elif message.topic == MQTT_TOPIC_TOTAL_IMPORT:
         netzbezug = message.payload
     elif message.topic == MQTT_TOPIC_TOTAL_EXPORT:
         einspeisung = message.payload
-#    elif message.topic == MQTT_TOPIC_TIME:
-#        rtime = message.payload
-
-#    with open('/var/lib/check_mk_agent/spool/60_UpdateTime', 'w') as the_file:
-#        the_file.write('<<<local>>>\n')
-#        the_file.write('0 UpdateTime leistung=' + str(leistung)[2:-1] + ' Last MQTT Update ' + str(rtime)[2:-1] + " Leistung: " + str(leistung)[2:-1] + "W\n")
+    elif message.topic == MQTT_TOPIC_TIME:
+        rtime = message.payload
 
     lock.release()
 
-mqttc.on_message = on_message
-
-mqttc.loop_start()
 
 ###############################################################
 # Update Modbus Registers
 ###############################################################
+def calculate_register(value_float):
+    if value_float == 0:
+        int1 = 0
+        int2 = 0
+    else:
+        value_hex = hex(struct.unpack('<I', struct.pack('<f', value_float))[0])
+        value_hex_part1 = str(value_hex)[2:6] #extract first register part (hex)
+        value_hex_part2 = str(value_hex)[6:10] #extract seconds register part (hex)
+        int1 = int(value_hex_part1, 16) #convert hex to integer because pymodbus converts back to hex itself
+        int2 = int(value_hex_part2, 16) #convert hex to integer because pymodbus converts back to hex itself
+    return (int1,int2)
+
 def updating_writer(a_context):
     global leistung
     global einspeisung
     global netzbezug
-#    global rtime
+    global l1
+    global l2
+    global l3
+    global rtime
 
     global ep_int1
     global ep_int2
@@ -185,54 +228,42 @@ def updating_writer(a_context):
     global exp_int2
     global ti_int1
     global ti_int2
+    global l1_int1
+    global l1_int2
+    global l2_int1
+    global l2_int2
+    global l3_int1
+    global l3_int2
 
     global flag_connected
 
     lock.acquire()
     #Considering correction factor
-    print("Korrigierte Werte")
 
     float_netzbezug = float(netzbezug)
     netzbezug_corr = float_netzbezug*i_corrfactor
-    print (netzbezug_corr)
+    #print (netzbezug_corr)
 
     float_einspeisung = float(einspeisung)
     einspeisung_corr = float_einspeisung*i_corrfactor
-    print (einspeisung_corr)
+    #print (einspeisung_corr)
 
-    #Converting current power consumption out of MQTT payload to Modbus register
+    #Converting values of MQTT payload to Modbus register
 
-    electrical_power_float = float(leistung) #extract value out of payload
-    print (electrical_power_float)
-    if electrical_power_float == 0:
-        ep_int1 = 0
-        ep_int2 = 0
+    ep_int1, ep_int2 = calculate_register(float(leistung))
+    ti_int1, ti_int2 = calculate_register(netzbezug_corr)
+    exp_int1, exp_int2 = calculate_register(einspeisung_corr)
+
+    if MQTT_TOPIC_L1_CONSUMPTION == "" or MQTT_TOPIC_L2_CONSUMPTION == "" or MQTT_TOPIC_L3_CONSUMPTION == "":
+        l1_int1, l1_int2 = l2_int1, l2_int2 = l3_int1, l3_int2 = calculate_register(float(leistung)/3)
     else:
-        electrical_power_hex = hex(struct.unpack('<I', struct.pack('<f', electrical_power_float))[0])
-        electrical_power_hex_part1 = str(electrical_power_hex)[2:6] #extract first register part (hex)
-        electrical_power_hex_part2 = str(electrical_power_hex)[6:10] #extract seconds register part (hex)
-        ep_int1 = int(electrical_power_hex_part1, 16) #convert hex to integer because pymodbus converts back to hex itself
-        ep_int2 = int(electrical_power_hex_part2, 16) #convert hex to integer because pymodbus converts back to hex itself
+        l1_int1, l1_int2 = calculate_register(float(l1))
+        l2_int1, l2_int2 = calculate_register(float(l2))
+        l3_int1, l3_int2 = calculate_register(float(l3))
 
-    #Converting total import value of smart meter out of MQTT payload into Modbus register
 
-    total_import_float = int(netzbezug_corr)
-    total_import_hex = hex(struct.unpack('<I', struct.pack('<f', total_import_float))[0])
-    total_import_hex_part1 = str(total_import_hex)[2:6]
-    total_import_hex_part2 = str(total_import_hex)[6:10]
-    ti_int1  = int(total_import_hex_part1, 16)
-    ti_int2  = int(total_import_hex_part2, 16)
 
-    #Converting total export value of smart meter out of MQTT payload into Modbus register
-
-    total_export_float = int(einspeisung_corr)
-    total_export_hex = hex(struct.unpack('<I', struct.pack('<f', total_export_float))[0])
-    total_export_hex_part1 = str(total_export_hex)[2:6]
-    total_export_hex_part2 = str(total_export_hex)[6:10]
-    exp_int1 = int(total_export_hex_part1, 16)
-    exp_int2 = int(total_export_hex_part2, 16)
-
-    print("updating the context")
+    #updating the context
     context = a_context[0]
     register = 3
     slave_id = 0x01
@@ -251,9 +282,9 @@ def updating_writer(a_context):
               0, 0,               #Voltage - Phase L1 to L3 [V]
               0, 0,               #AC Frequency [Hz]
               ep_int1, 0,         #AC Power value (Total) [W] ==> Second hex word not needed
-              0, 0,               #AC Power Value L1 [W]
-              0, 0,               #AC Power Value L2 [W]
-              0, 0,               #AC Power Value L3 [W]
+              l1_int1, 0,         #AC Power Value L1 [W]
+              l2_int1, 0,         #AC Power Value L2 [W]
+              l3_int1, 0,         #AC Power Value L3 [W]
               0, 0,               #AC Apparent Power [VA]
               0, 0,               #AC Apparent Power L1 [VA]
               0, 0,               #AC Apparent Power L2 [VA]
@@ -262,7 +293,7 @@ def updating_writer(a_context):
               0, 0,               #AC Reactive Power L1 [VAr]
               0, 0,               #AC Reactive Power L2 [VAr]
               0, 0,               #AC Reactive Power L3 [VAr]
-              0, 0,	          #AC power factor total [cosphi]
+              0, 0,               #AC power factor total [cosphi]
               0, 0,               #AC power factor L1 [cosphi]
               0, 0,               #AC power factor L2 [cosphi]
               0, 0,               #AC power factor L3 [cosphi]
@@ -282,9 +313,10 @@ def updating_writer(a_context):
               0, 0,               #VA hours imported L1 [VAr]
               0, 0,               #VA hours imported L2 [VAr]
               0, 0                #VA hours imported L3 [VAr]
-]
-
+    ]
+    #print(values)
     context.setValues(register, address, values)
+    time.sleep(1)
     lock.release()
 
 
@@ -303,8 +335,8 @@ def run_updating_server():
                 83,109,97,114,116,32,77,101,116,101,114,32,54,51,65,0, #Device Model "Smart Meter
                 0,0,0,0,0,0,0,0,                                       #Options N/A
                 0,0,0,0,0,0,0,0,                                       #Software Version  N/A
-                48,48,48,48,48,48,48,49,0,0,0,0,0,0,0,0,               #Serial Number: 00000
-                240],                                                  #Modbus TCP Address: 
+                48,48,48,48,48,48,48,50,0,0,0,0,0,0,0,0,               #Serial Number: 00000 (should be different if there are more Smart Meters)
+                240],                                                  #Modbus TCP Address:
         40070: [213],
         40071: [124],
         40072: [0,0,0,0,0,0,0,0,0,0,
@@ -336,28 +368,34 @@ def run_updating_server():
     lock.release()
 
     ###############################################################
-    # Run Update Register every 5 Seconds
+    # Run Update Register every 2 Seconds
     ###############################################################
-    time = 5  # 5 seconds delay
+    time = 2  # 2 seconds delay
     rt = RepeatedTimer(time, updating_writer, a_context)
 
     print("### start server, listening on " + str(modbus_port))
     address = ("", modbus_port)
     StartTcpServer(
-            context=a_context,  
+            context=a_context,
             address=address,
-            framer=ModbusSocketFramer,
-            allow_reuse_address=True,
+            framer=ModbusSocketFramer
+            # TBD handler=None,  # handler for each session
+            # allow_reuse_address=True,  # allow the reuse of an address
+            # ignore_missing_slaves=True,  # ignore request to a missing slave
+            # broadcast_enable=False,  # treat unit_id 0 as broadcast address,
+            # TBD timeout=1,  # waiting time for request to complete
+            # TBD strict=True,  # use strict timing, t1.5 for Modbus RTU
+            # defer_start=False,  # Only define server do not activate
         )
 
 
 values_ready = False
-
+init_mqtt()
 while not values_ready:
       print("Warten auf Daten von MQTT Broker")
       time.sleep(1)
       lock.acquire()
-      if netzbezug  != '0' and einspeisung != '0':
+      if netzbezug  != '0' or einspeisung != '0' :
          print("Daten vorhanden. Starte Modbus Server")
          values_ready = True
       lock.release()
